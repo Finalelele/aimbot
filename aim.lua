@@ -56,6 +56,8 @@ local Options = {
 }
 
 local FriendsCache = {}
+local FriendCheckQueue = {}
+local isProcessingFriendQueue = false
 local WhitelistDropdown = nil
 local ActiveEspObjects = {} 
 local ActiveTracers = {}    
@@ -75,6 +77,31 @@ local mainIgnoreTable = {}
 local wallCheckRaycastParams = RaycastParams.new()
 wallCheckRaycastParams.FilterType = Enum.RaycastFilterType.Exclude
 local wallCheckIgnoreTable = {}
+
+-- ===== ОЧЕРЕДЬ ПРОВЕРКИ ДРУЗЕЙ =====
+local function processFriendQueue()
+    if isProcessingFriendQueue then return end
+    isProcessingFriendQueue = true
+    task.spawn(function()
+        while #FriendCheckQueue > 0 do
+            local player = table.remove(FriendCheckQueue, 1)
+            if player and player.Parent and player ~= LocalPlayer then
+                pcall(function()
+                    local isFriend = LocalPlayer:IsFriendsWith(player.UserId)
+                    FriendsCache[player.Name] = isFriend
+                end)
+            end
+            task.wait(0.3)
+        end
+        isProcessingFriendQueue = false
+    end)
+end
+
+local function queueFriendCheck(player)
+    if player == LocalPlayer then return end
+    table.insert(FriendCheckQueue, player)
+    processFriendQueue()
+end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if input.UserInputType == Enum.UserInputType.MouseButton2 or input.UserInputType == Enum.UserInputType.Touch then
@@ -253,7 +280,6 @@ local function createEsp(player)
     end
 end
 
--- Мягкое скрытие ESP вместо дестроя (решает проблему спама)
 local function hideEsp(player)
     local esp = ActiveEspObjects[player]
     if esp then
@@ -269,7 +295,6 @@ local function hideEsp(player)
     end
 end
 
--- Полное удаление (вызывается ТОЛЬКО при выходе игрока или закрытии скрипта)
 local function removeEsp(player)
     if ActiveEspObjects[player] then
         pcall(function() ActiveEspObjects[player].Folder:Destroy() end)
@@ -290,14 +315,6 @@ local function removeEsp(player)
     end
 end
 
-local function cacheFriendStatus(player)
-    if player == LocalPlayer then return end
-    pcall(function()
-        local isFriend = LocalPlayer:IsFriendsWith(player.UserId)
-        FriendsCache[player.Name] = isFriend
-    end)
-end
-
 local function getPlayerNames()
     local names = {}
     for _, p in ipairs(Players:GetPlayers()) do
@@ -307,12 +324,12 @@ local function getPlayerNames()
 end
 
 for _, p in ipairs(Players:GetPlayers()) do 
-    cacheFriendStatus(p) 
+    queueFriendCheck(p) 
     createEsp(p)
 end
 
 Players.PlayerAdded:Connect(function(player)
-    cacheFriendStatus(player)
+    queueFriendCheck(player)
     createEsp(player)
     if WhitelistDropdown then
         pcall(function()
@@ -322,6 +339,11 @@ Players.PlayerAdded:Connect(function(player)
 end)
 
 Players.PlayerRemoving:Connect(function(player)
+    for i = #FriendCheckQueue, 1, -1 do
+        if FriendCheckQueue[i] == player then
+            table.remove(FriendCheckQueue, i)
+        end
+    end
     FriendsCache[player.Name] = nil
     Options.Whitelist[player.Name] = nil
     removeEsp(player)
@@ -709,7 +731,6 @@ local function isVisible(originPos, targetPart, character)
     return false
 end
 
--- Твоя оригинальная логика Team Check (нейтралы считаются союзниками)
 local function isAllyFast(player)
     if not player then return false end
     
@@ -814,7 +835,6 @@ local function getClosestEnemy(originPos, character)
     return CurrentTarget
 end
 
--- ТВОЯ ОПТИМИЗАЦИЯ: Используется строго GetChildren()!
 local function updateHitboxes(forceReset)
     local currentSize = Options.HitboxSize or 10
     local hitboxAim = Options.HitboxSilentAim and not forceReset
@@ -960,11 +980,17 @@ local function onRenderStep()
         if model and checkValidTarget(model) then
             lastShot = tick()
             task.spawn(function()
-                local screenX = Camera.ViewportSize.X / 2
-                local screenY = Camera.ViewportSize.Y / 2
-                VirtualInputManager:SendMouseButtonEvent(screenX, screenY, 0, true, game, 0)
-                task.wait()
-                VirtualInputManager:SendMouseButtonEvent(screenX, screenY, 0, false, game, 0)
+                local char = LocalPlayer.Character
+                local tool = char and char:FindFirstChildOfClass("Tool")
+                if tool then
+                    tool:Activate()
+                else
+                    local screenX = Camera.ViewportSize.X / 2
+                    local screenY = Camera.ViewportSize.Y / 2
+                    VirtualInputManager:SendMouseButtonEvent(screenX, screenY, 0, true, game, 0)
+                    task.wait()
+                    VirtualInputManager:SendMouseButtonEvent(screenX, screenY, 0, false, game, 0)
+                end
             end)
         end
     end
@@ -978,7 +1004,6 @@ local function onRenderStep()
     local myHrp = character and character:FindFirstChild("HumanoidRootPart")
     local myPos = myHrp and myHrp.Position or Camera.CFrame.Position
 
-    -- ОТРИСОВКА И СКРЫТИЕ ESP (Без дестроев внутри цикла)
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
 
@@ -986,7 +1011,6 @@ local function onRenderStep()
         local hrp = pChar and pChar:FindFirstChild("HumanoidRootPart")
         local humanoid = pChar and pChar:FindFirstChildOfClass("Humanoid")
         
-        -- Если ESP выключен или игрок недоступен — просто скрываем UI
         if not isEspActive or not pChar or not hrp or not humanoid then
             hideEsp(player)
             continue
@@ -1004,7 +1028,6 @@ local function onRenderStep()
             continue
         end
 
-        -- Гарантируем наличие ESP-объектов
         if not ActiveEspObjects[player] then
             createEsp(player)
         end
@@ -1012,7 +1035,6 @@ local function onRenderStep()
         local esp = ActiveEspObjects[player]
         if not esp then continue end
 
-        -- Проверка на команды
         local isAllowedVisual = false
         if Options.EspTeam then
             isAllowedVisual = true
@@ -1030,7 +1052,6 @@ local function onRenderStep()
             continue
         end
 
-        -- Если проверки пройдены, настраиваем отображение
         if esp.Folder.Parent ~= CoreGui then esp.Folder.Parent = CoreGui end
 
         local teamColor = player.TeamColor and player.TeamColor.Color or Color3.fromRGB(255, 0, 0)
